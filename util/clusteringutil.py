@@ -349,7 +349,7 @@ def arya_etal_k_median(df, n_clusters, num_trial = 1):
 
     actual_centers = []
     for c in best_cluster_centers:
-        actual_centers.append(df.iloc[c].data.tolist())
+        actual_centers.append(df.iloc[c].values.tolist())
 
     return best_cost, best_pred, actual_centers
 

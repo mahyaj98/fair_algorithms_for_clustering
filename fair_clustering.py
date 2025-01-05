@@ -3,9 +3,9 @@ import time
 from collections import defaultdict
 from functools import partial
 import numpy as np
-import pandas as pd
+from sympy import ceiling
+
 from cplex_fair_assignment_lp_solver import fair_partial_assignment
-from cplex_violating_clustering_lp_solver import violating_lp_clustering
 from util.clusteringutil import (clean_data, read_data, scale_data,
                                  subsample_data, take_by_key,
                                  vanilla_clustering, write_fairness_trial)
@@ -23,7 +23,7 @@ from util.configutil import read_list
 #       exceeds this number, the dataset will be subsampled to this amount.
 # Output:
 #   None (Writes to file in `data_dir`)  
-def fair_clustering(dataset, config_file, data_dir, num_clusters, deltas, max_points, violating, violation):
+def fair_clustering(dataset, config_file, data_dir, num_clusters, deltas, max_points):
     config = configparser.ConfigParser(converters={'list': read_list})
     config.read(config_file)
 
@@ -52,7 +52,7 @@ def fair_clustering(dataset, config_file, data_dir, num_clusters, deltas, max_po
         condition_str = variable + "_conditions"
         bucket_conditions = config[dataset].getlist(condition_str)
 
-        # For each row, if the row passes the bucket condition, 
+        # For each row, if the row passes the bucket condition,
         # then the row is added to that color class
         for i, row in df.iterrows():
             for bucket_idx, bucket in enumerate(bucket_conditions):
@@ -65,9 +65,14 @@ def fair_clustering(dataset, config_file, data_dir, num_clusters, deltas, max_po
 
     # representation (dict[str -> dict[int -> float]]) : representation of each color compared to the whole dataset
     representation = {}
+    min_rep = 1
+    max_rep = 0
     for var, bucket_dict in attributes.items():
         representation[var] = {k : (len(bucket_dict[k]) / len(df)) for k in bucket_dict.keys()}
-
+        if var != 'default':
+            min_rep = min(min(representation[var].values()),min_rep)
+            max_rep = max(max(representation[var].values()),max_rep)
+    t = ceiling(max_rep/min_rep)
     # Select only the desired columns
     selected_columns = config[dataset].getlist("columns")
     df = df[[col for col in selected_columns]]
@@ -80,46 +85,40 @@ def fair_clustering(dataset, config_file, data_dir, num_clusters, deltas, max_po
     # Cluster the data -- using the objective specified by clustering_method
     clustering_method = config["DEFAULT"]["clustering_method"]
 
-    if not violating:
-        t1 = time.monotonic()
-        initial_score, pred, cluster_centers = vanilla_clustering(df, num_clusters, clustering_method)
-        t2 = time.monotonic()
-        cluster_time = t2 - t1
-        print("Clustering time: {}".format(cluster_time))
-        
-        ### Calculate fairness statistics
-        # fairness ( dict[str -> defaultdict[int-> defaultdict[int -> int]]] )
-        # fairness : is used to hold how much of each color belongs to each cluster
-        fairness = {}
-        # For each point in the dataset, assign it to the cluster and color it belongs too
-        for attr, colors in attributes.items():
-            fairness[attr] = defaultdict(partial(defaultdict, int))
-            for i, row in enumerate(df.iterrows()):
-                cluster = pred[i]
-                for color in colors:
-                    if i in colors[color]:
-                        fairness[attr][cluster][color] += 1
-                        continue
+    t1 = time.monotonic()
+    initial_score, pred, cluster_centers = vanilla_clustering(df, num_clusters, clustering_method)
+    t2 = time.monotonic()
+    cluster_time = t2 - t1
+    print("Clustering time: {}".format(cluster_time))
 
-        # sizes (list[int]) : sizes of clusters
-        sizes = [0 for _ in range(num_clusters)]
-        for p in pred:
-            sizes[p] += 1
+    ### Calculate fairness statistics
+    # fairness ( dict[str -> defaultdict[int-> defaultdict[int -> int]]] )
+    # fairness : is used to hold how much of each color belongs to each cluster
+    fairness = {}
+    # For each point in the dataset, assign it to the cluster and color it belongs too
+    for attr, colors in attributes.items():
+        fairness[attr] = defaultdict(partial(defaultdict, int))
+        for i, row in enumerate(df.iterrows()):
+            cluster = pred[i]
+            for color in colors:
+                if i in colors[color]:
+                    fairness[attr][cluster][color] += 1
+                    continue
 
-        # ratios (dict[str -> dict[int -> list[float]]]): Ratios for colors in a cluster
-        ratios = {}
-        for attr, colors in attributes.items():
-            attr_ratio = {}
-            for cluster in range(num_clusters):
-                attr_ratio[cluster] = [fairness[attr][cluster][color] / sizes[cluster] 
-                                for color in sorted(colors.keys())]
-            ratios[attr] = attr_ratio
-    else:
-        # These added so that output format is consistent among violating and
-        # non-violating trials
-        cluster_time, initial_score = 0, 0
-        fairness, ratios = {}, {}
-        sizes, cluster_centers = [], []
+    # sizes (list[int]) : sizes of clusters
+    sizes = [0 for _ in range(num_clusters)]
+    for p in pred:
+        sizes[p] += 1
+
+    # ratios (dict[str -> dict[int -> list[float]]]): Ratios for colors in a cluster
+    ratios = {}
+    for attr, colors in attributes.items():
+        attr_ratio = {}
+        for cluster in range(num_clusters):
+            attr_ratio[cluster] = [fairness[attr][cluster][color] / sizes[cluster]
+                            for color in sorted(colors.keys())]
+        ratios[attr] = attr_ratio
+
 
     # dataset_ratio : Ratios for colors in the dataset
     dataset_ratio = {}
@@ -129,97 +128,57 @@ def fair_clustering(dataset, config_file, data_dir, num_clusters, deltas, max_po
 
     # fairness_vars (list[str]) : Variables to perform fairness balancing on
     fairness_vars = config[dataset].getlist("fairness_variable")
-    for delta in deltas:
-        #   alpha_i = a_val * (representation of color i in dataset)
-        #   beta_i  = b_val * (representation of color i in dataset)
-        alpha, beta = {}, {}
-        a_val, b_val = 1 / (1 - delta), 1 - delta
-        for var, bucket_dict in attributes.items():
-            alpha[var] = {k : a_val * representation[var][k] for k in bucket_dict.keys()}
-            beta[var] = {k : b_val * representation[var][k] for k in bucket_dict.keys()}
 
-        # Only include the entries for the variables we want to perform fairness on
-        # (in `fairness_vars`). The others are kept for statistics.
-        fp_color_flag, fp_alpha, fp_beta = (take_by_key(color_flag, fairness_vars),
-                                            take_by_key(alpha, fairness_vars),
-                                            take_by_key(beta, fairness_vars))
-
+    fp_color_flag = take_by_key(color_flag, fairness_vars)
+    fp_attributes = take_by_key(attributes, fairness_vars)
         # Solves partial assignment and then performs rounding to get integral assignment
-        if not violating:
-            t1 = time.monotonic()
-            res = fair_partial_assignment(df, cluster_centers, fp_alpha, fp_beta, fp_color_flag, clustering_method)
-            t2 = time.monotonic()
-            lp_time = t2 - t1
+    epsilon = 0.01
+    g_opt = initial_score
+    for i in range(0,100):
 
-        else:
-            t1 = time.monotonic()
-            res = violating_lp_clustering(df, num_clusters, fp_alpha, fp_beta, fp_color_flag, clustering_method, violation)
-            t2 = time.monotonic()
-            lp_time = t2 - t1
+        t1 = time.monotonic()
+        res = fair_partial_assignment(df, cluster_centers, fp_color_flag, fp_attributes, t, g_opt)
+        t2 = time.monotonic()
+        fair_time = t2 - t1
+        g_opt = g_opt * (1 + epsilon)
 
-            # Added so that output formatting is consistent among violating
-            # and non-violating trials
-            res["partial_objective"] = 0
-            res["partial_assignment"] = []
 
-        ### Output / Writing data to a file
-        # output is a dictionary which will hold the data to be written to the
-        #   outfile as key-value pairs. Outfile will be written in JSON format.
-        output = {}
+        if res.get("success") == 'optimal':
+            output = {}
 
-        # num_clusters for re-running trial
-        output["num_clusters"] = num_clusters
+            output["num_clusters"] = num_clusters
 
-        # Whether or not the LP found a solution
-        output["success"] = res["success"]
+            output["success"] = res["success"]
 
-        # Nonzero status -> error occurred
-        output["status"] = res["status"]
-        
-        output["dataset_distribution"] = dataset_ratio
+            output["status"] = res["status"]
 
-        # Save alphas and betas from trials
-        output["alpha"] = alpha
-        output["beta"] = beta
+            output["dataset_distribution"] = dataset_ratio
 
-        # Save original clustering score
-        output["unfair_score"] = initial_score
 
-        # Clustering score after addition of fairness
-        output["fair_score"] = res["objective"]
-        
-        # Clustering score after initial LP
-        output["partial_fair_score"] = res["partial_objective"]
+            output["unfair_score"] = initial_score
 
-        # Save size of each cluster
-        output["sizes"] = sizes
+            output["fair_score"] = res["objective"]
 
-        output["attributes"] = attributes
+            output["partial_fair_score"] = res["partial_objective"]
 
-        # Save the ratio of each color in its cluster
-        output["ratios"] = ratios
+            output["sizes"] = sizes
 
-        # These included at end because their data is large
-        # Save points, colors for re-running trial
-        # Partial assignments -- list bc. ndarray not serializable
-        output["centers"] = [list(center) for center in cluster_centers]
-        output["points"] = [list(point) for point in df.values]
-        output["assignment"] = res["assignment"]
+            output["attributes"] = attributes
 
-        output["partial_assignment"] = res["partial_assignment"]
+            output["ratios"] = ratios
 
-        output["name"] = dataset
-        output["clustering_method"] = clustering_method
-        output["scaling"] = scaling
-        output["delta"] = delta
-        output["time"] = lp_time
-        output["cluster_time"] = cluster_time
-        output["violating"] = violating
-        output["violation"] = violation
 
-        # Writes the data in `output` to a file in data_dir
-        write_fairness_trial(output, data_dir)
+            output["centers"] = [list(center) for center in cluster_centers]
+            output["points"] = [list(point) for point in df.values]
+            output["assignment"] = res["assignment"]
 
-        # Added because sometimes the LP for the next iteration solves so 
-        # fast that `write_fairness_trial` cannot write to disk
-        time.sleep(1) 
+            output["partial_assignment"] = res["partial_assignment"]
+
+            output["name"] = dataset
+            output["clustering_method"] = clustering_method
+            output["scaling"] = scaling
+            output["time"] = fair_time
+            output["cluster_time"] = cluster_time
+
+
+            time.sleep(1)
