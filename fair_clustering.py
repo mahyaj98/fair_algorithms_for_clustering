@@ -1,11 +1,21 @@
 import configparser
+import json
 import time
 from collections import defaultdict
 from functools import partial
-import numpy as np
-from sympy import ceiling
+import os
+from scipy.spatial.distance import cdist
+from sklearn.metrics.pairwise import pairwise_distances
 
-from cplex_fair_assignment_lp_solver import fair_partial_assignment
+from pyarrow.dataset import dataset
+from sympy import ceiling
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# from cplex_fair_assignment_lp_solver import fair_partial_assignment
+
+from gurobi_fair_assignment_lp_solver import fair_partial_assignment
+
 from util.clusteringutil import (clean_data, read_data, scale_data,
                                  subsample_data, take_by_key,
                                  vanilla_clustering, write_fairness_trial)
@@ -22,8 +32,12 @@ from util.configutil import read_list
 #   max_points (int ; default = 0) : if the number of points in the dataset 
 #       exceeds this number, the dataset will be subsampled to this amount.
 # Output:
-#   None (Writes to file in `data_dir`)  
-def fair_clustering(dataset, config_file, data_dir, num_clusters, deltas, max_points):
+#   None (Writes to file in `data_dir`)
+def cost_function_euc(df):
+    all_pair_distance = pairwise_distances(df.values)
+    return all_pair_distance.ravel().tolist()
+
+def fair_clustering(dataset: str, config_file: str, data_dir: str, num_clusters: int, max_points: int) -> None:
     config = configparser.ConfigParser(converters={'list': read_list})
     config.read(config_file)
 
@@ -65,15 +79,14 @@ def fair_clustering(dataset, config_file, data_dir, num_clusters, deltas, max_po
 
     # representation (dict[str -> dict[int -> float]]) : representation of each color compared to the whole dataset
     representation = {}
-    min_rep = 1
-    max_rep = 0
+
     for var, bucket_dict in attributes.items():
         representation[var] = {k : (len(bucket_dict[k]) / len(df)) for k in bucket_dict.keys()}
-        if var != 'default':
-            min_rep = min(min(representation[var].values()),min_rep)
-            max_rep = max(max(representation[var].values()),max_rep)
-    t = ceiling(max_rep/min_rep)
-    # Select only the desired columns
+
+    attr = list(attributes.keys())[0]
+    t = ceiling(max([len(attributes[attr][color]) for color in attributes[attr].keys()])/min([len(attributes[attr][color]) for color in attributes[attr].keys()]))
+    print( "t= " + str( t ) )
+
     selected_columns = config[dataset].getlist("columns")
     df = df[[col for col in selected_columns]]
 
@@ -90,6 +103,8 @@ def fair_clustering(dataset, config_file, data_dir, num_clusters, deltas, max_po
     t2 = time.monotonic()
     cluster_time = t2 - t1
     print("Clustering time: {}".format(cluster_time))
+
+
 
     ### Calculate fairness statistics
     # fairness ( dict[str -> defaultdict[int-> defaultdict[int -> int]]] )
@@ -119,6 +134,14 @@ def fair_clustering(dataset, config_file, data_dir, num_clusters, deltas, max_po
                             for color in sorted(colors.keys())]
         ratios[attr] = attr_ratio
 
+    color_per_centre_vanilla = {}
+    for attr, colors in attributes.items():
+        attr_count = {}
+        for cluster in range(num_clusters):
+            attr_count[cluster] = [fairness[attr][cluster][color]
+                                   for color in sorted(colors.keys())]
+        color_per_centre_vanilla[attr] = attr_count
+
 
     # dataset_ratio : Ratios for colors in the dataset
     dataset_ratio = {}
@@ -131,54 +154,96 @@ def fair_clustering(dataset, config_file, data_dir, num_clusters, deltas, max_po
 
     fp_color_flag = take_by_key(color_flag, fairness_vars)
     fp_attributes = take_by_key(attributes, fairness_vars)
+
+    distances = cost_function_euc(df)
+    max_distance = max(distances)
         # Solves partial assignment and then performs rounding to get integral assignment
-    epsilon = 0.01
+    epsilon = 0.1
     g_opt = initial_score
+    output = defaultdict( dict )
+    t1 = time.monotonic()
     for i in range(0,100):
 
-        t1 = time.monotonic()
         res = fair_partial_assignment(df, cluster_centers, fp_color_flag, fp_attributes, t, g_opt)
-        t2 = time.monotonic()
-        fair_time = t2 - t1
-        g_opt = g_opt * (1 + epsilon)
+
+        if res["success"] == 2:
+
+            output[i] = {}
+
+            output[i]["Opt_cutoff"] = g_opt
+
+            output[i]["num_clients"] = len(df)
+
+            output[i]["num_clusters"] = num_clusters
+
+            output[i]["num_colors"] = len(attributes[attr])
+
+            output[i]["t_value"] = float(t)
+
+            output[i]["success"] = res["success"]
+
+            output[i]["dataset_distribution"] = dataset_ratio
+
+            output[i]["unfair_score"] = initial_score
+
+            output[i]["fair_score"] = res["fair_cost"]
+
+            output[i]["partial_fair_score"] = res["partial_objective"]
+
+            output[i]["sizes"] = sizes
+
+            output[i]["attributes"] = attributes
+
+            output[i]["ratios"] = ratios
+
+            output[i]["centers"] = [list(center) for center in cluster_centers]
+
+            output[i]["points"] = [list(point) for point in df.values]
 
 
-        if res.get("success") == 'optimal':
-            output = {}
+            output[i]["assignment"] = res["assignment"]
 
-            output["num_clusters"] = num_clusters
+            output[i]["partial_assignment"] = res["partial_assignment"]
 
-            output["success"] = res["success"]
+            output[i]["name"] = dataset
 
-            output["status"] = res["status"]
+            output[i]["cluster_time"] = cluster_time
 
-            output["dataset_distribution"] = dataset_ratio
+            output[i]["color_per_centre"] = res["color_per_centre"]
 
+            output[i]["color_per_centre_vanilla"] = color_per_centre_vanilla
 
-            output["unfair_score"] = initial_score
-
-            output["fair_score"] = res["objective"]
-
-            output["partial_fair_score"] = res["partial_objective"]
-
-            output["sizes"] = sizes
-
-            output["attributes"] = attributes
-
-            output["ratios"] = ratios
+            if g_opt > max_distance:
+                break
+            g_opt = g_opt * (1 + epsilon)
 
 
-            output["centers"] = [list(center) for center in cluster_centers]
-            output["points"] = [list(point) for point in df.values]
-            output["assignment"] = res["assignment"]
+    t2 = time.monotonic()
+    fair_time = t2 - t1
+    if len(output) > 0:
+        min_obj = 1000000000
+        min_obj_index = -1
+        for index, res in output.items():
+            if res["fair_score"] < min_obj:
+                min_obj = res["fair_score"]
+                min_obj_index = index
 
-            output["partial_assignment"] = res["partial_assignment"]
+        save_file_string = dataset +  "_" + str(output[min_obj_index]["num_clients"])  + "_" + str(output[min_obj_index]["num_clusters"]) + "_" + str(output[min_obj_index]["num_colors"]) + "_" + str(output[min_obj_index]["t_value"])
 
-            output["name"] = dataset
-            output["clustering_method"] = clustering_method
-            output["scaling"] = scaling
-            output["time"] = fair_time
-            output["cluster_time"] = cluster_time
+        os.makedirs("./" + save_file_string + "/", exist_ok=True)
+
+        out_file = open( "./" + save_file_string + "/output.json", "w" )
+        output[min_obj_index]["fair_time"] = fair_time
+        json.dump(output[min_obj_index], out_file)
+
+        df_plot = pd.DataFrame(color_per_centre_vanilla[attr])
+        df_plot.transpose().plot.bar()
+
+        plt.savefig("./" + save_file_string + "/vanilla.png")
+
+        df_plot = pd.DataFrame(output[min_obj_index]["color_per_centre"])
+        df_plot.transpose().plot.bar()
+        plt.savefig("./" + save_file_string + "/fair.png")
 
 
-            time.sleep(1)
+

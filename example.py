@@ -17,9 +17,8 @@ data_dir = config[config_str].get("data_dir")
 dataset = config[config_str].get("dataset")
 clustering_config_file = config[config_str].get("config_file")
 num_clusters = list(map(int, config[config_str].getlist("num_clusters")))
-deltas = list(map(float, config[config_str].getlist("deltas")))
 max_points = config[config_str].getint("max_points")
 
 
 for n_clusters in num_clusters:
-    fair_clustering(dataset, clustering_config_file, data_dir, n_clusters, deltas, max_points)
+    fair_clustering(dataset, clustering_config_file, data_dir, n_clusters, max_points)

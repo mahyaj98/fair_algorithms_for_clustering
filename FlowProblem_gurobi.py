@@ -1,12 +1,9 @@
 import numpy as np
 from collections import defaultdict
-
 from numpy.ma.extras import unique
 from scipy.spatial.distance import cdist
-from cplex import Cplex
-import time
-
-from itertools import permutations
+import gurobipy as gp
+from gurobipy import GRB
 
 def construct_flow_lp(df, centres, color_flag, atrributes, res, t, g_opt):
     color_lb = {}
@@ -23,69 +20,63 @@ def construct_flow_lp(df, centres, color_flag, atrributes, res, t, g_opt):
     cost_fun_string = 'euclidean'
     problem, objective = fair_flow_lp_solver(df, centres, color_flag, cost_fun_string, t, g_opt, color_lb)
 
-    t1 = time.monotonic()
-    problem.solve()
-    t2 = time.monotonic()
-    print("LP solving time = {}".format(t2 - t1))
+    problem.optimize()
 
-
-    flow_res = {
-        "status": problem.solution.get_status(),
-        "success": problem.solution.get_status_string(),
-        "objective": problem.solution.get_objective_value(),
-        "assignment": problem.solution.get_values(),
-    }
+    if problem.Status != 2:
+        flow_res = {
+            "success": problem.Status,
+            "objective": -1,
+            "assignment": [0 for var in problem.getVars()],
+        }
+    else:
+        flow_res = {
+            "success": problem.Status,
+            "objective": problem.ObjVal,
+            "assignment": [var.X for var in problem.getVars()],
+        }
 
     return flow_res
 
 def fair_flow_lp_solver(df, centers, color_flag, cost_fun_string, t, g_opt, color_lb):
-    print("Initializing Cplex model")
-    problem = Cplex()
+    problem = gp.Model("mip2")
 
-    # Step 2. Declare that this is a minimization problem
+    lower_bounds, upper_bounds, variable_names = prepare_to_add_variables_flow( df, centers )
 
-    problem.objective.set_sense(problem.objective.sense.minimize)
+    varname_to_var = {}
+    for i in range( len( variable_names ) ):
+        varname_to_var [variable_names [i]] = problem.addVar( lb=lower_bounds [i], ub=upper_bounds [i],
+                                                              name=variable_names [i] )
 
-    # Step 3.   Declare and  add variables to the model. The function
-    #           prepare_to_add_variables (points, center) prepares all the
-    #           required information for this stage.
-    #
-    #    objective: a list of coefficients (float) in the linear objective function
-    #    lower bounds: a list of floats containing the lower bounds for each variable
-    #    upper bounds: a list of floats containing the upper bounds for each variable
-    #    variable_name: a list of strings that contains the name of the variables
-
-    print("Starting to add variables...")
-    t1 = time.monotonic()
-    objective, lower_bounds, upper_bounds, variable_names = prepare_to_add_variables_flow(df, centers, cost_fun_string)
-    problem.variables.add(obj=objective,
-                          lb=lower_bounds,
-                          ub=upper_bounds,
-                          names=variable_names)
-    t2 = time.monotonic()
-    print("Completed. Time for creating and adding variable = {}".format(t2 - t1))
-
-    print("Starting to add constraints...")
-    t1 = time.monotonic()
-    objects_returned = prepare_to_add_constraints_flow(df, centers, cost_fun_string, color_flag, t, g_opt, color_lb)
+    objects_returned = prepare_to_add_constraints_flow( df, centers, cost_fun_string, color_flag, t, g_opt , color_lb)
     constraints_row, senses, rhs, constraint_names = objects_returned
-    problem.linear_constraints.add(lin_expr=constraints_row,
-                                   senses=senses,
-                                   rhs=rhs,
-                                   names=constraint_names)
-    t2 = time.monotonic()
-    print("Completed. Time for creating and adding constraints = {}".format(t2 - t1))
+    for i in range( len( constraints_row ) ):
+        if senses [i] == "E":
+            problem.addConstr( sum(
+                [varname_to_var [name] * coef for (name, coef) in
+                 zip( constraints_row [i] [0], constraints_row [i] [1] )] ) == rhs [i]
+                               , name=constraint_names [i] )
+        elif senses [i] == "G":
+            problem.addConstr( sum(
+                [varname_to_var [name] * coef for (name, coef) in
+                 zip( constraints_row [i] [0], constraints_row [i] [1] )] ) >= rhs [i]
+                               , name=constraint_names [i] )
+        else:
+            problem.addConstr( sum(
+                [varname_to_var [name] * coef for (name, coef) in
+                 zip( constraints_row [i] [0], constraints_row [i] [1] )] ) <= rhs [i]
+                               , name=constraint_names [i] )
 
-    # Optional: We can set various parameters to optimize the performance of the lp solver
-    # As an example, the following sets barrier method as the lp solving method
-    # The other available methods are: auto, primal, dual, sifting, concurrent
+    objective = cost_function_flow( df, centers, cost_fun_string )
 
-    # problem.parameters.lpmethod.set(problem.parameters.lpmethod.values.barrier)
+    problem.setObjective( sum(
+        [varname_to_var [name] * distance for (name, distance) in
+         zip( variable_names, objective )] ),
+        GRB.MINIMIZE
+    )
 
     return problem, objective
 
-
-def prepare_to_add_variables_flow(df, centers, cost_fun_string):
+def prepare_to_add_variables_flow(df, centers):
 
     num_points = len(df)
     num_centers = len(centers)
@@ -98,9 +89,8 @@ def prepare_to_add_variables_flow(df, centers, cost_fun_string):
     upper_bounds = [1 for _ in range(total_variables)]
 
 
-    objective = cost_function_flow(df, centers, cost_fun_string)
 
-    return objective, lower_bounds, upper_bounds, variable_names
+    return lower_bounds, upper_bounds, variable_names
 
 def cost_function_flow(df,centers, cost_fun_string):
     all_pair_distance = cdist(df.values,centers,cost_fun_string)
@@ -110,14 +100,13 @@ def cost_function_twoD_flow(df,centers, cost_fun_string):
     all_pair_distance = cdist(df.values,centers,cost_fun_string)
     return all_pair_distance.tolist()
 
-
 def prepare_to_add_constraints_flow(df, centers, cost_fun_string, color_flag, t, g_opt, color_lb):
 
     num_points = len(df)
     num_centers = len(centers)
 
 
-    constraints_row, rhs = constraint_sums_to_one(num_points, num_centers)
+    constraints_row, rhs = constraint_sums_to_one_flow(num_points, num_centers)
     sum_const_len = len(rhs)
 
     distances = cost_function_twoD_flow(df, centers, cost_fun_string)
@@ -140,21 +129,17 @@ def prepare_to_add_constraints_flow(df, centers, cost_fun_string, color_flag, t,
 
     return constraints_row, senses, rhs, constraint_names
 
-
-
-
 def constraints_cut_off_opt_flow(num_points, num_centers, distances ,g_opt):
 
     constraints = [[["x_{}_{}".format(j, i)],[1 if distances[j][i] > 3 * g_opt else 0]] for i in range(num_centers) for j in range(num_points)]
     rhs = [0] * (num_points * num_centers)
     return constraints, rhs
-def constraint_sums_to_one(num_points, num_centers):
+
+def constraint_sums_to_one_flow(num_points, num_centers):
 
     constraints = [[["x_{}_{}".format(j, i) for i in range(num_centers)], [1] * num_centers] for j in range(num_points)]
     rhs = [1] * num_points
     return constraints, rhs
-
-
 
 def constraint_color_flow(num_points, num_centers, color_flag,t, color_lb):
 
@@ -164,13 +149,13 @@ def constraint_color_flow(num_points, num_centers, color_flag,t, color_lb):
                          [-1 if color_flag[j] == color else 0 for j in range(num_points)]]
                         for i in range(num_centers) for color in color_list]
 
-    rhs_1 = [-max(np.floor(color_lb[color][i]),1) for i in range(num_centers) for color in color_list]
+    rhs_1 = [-np.floor(color_lb[color][i]) for i in range(num_centers) for color in color_list]
 
     rhs_constraints = [[["x_{}_{}".format(j, i) for j in range(num_points)],
                         [1 if color_flag[j] == color else 0 for j in range(num_points)]]
                        for i in range(num_centers) for color in color_list]
 
-    rhs_2 = [max(np.ceil(t * color_lb[color][i]),t) for i in range(num_centers) for color in color_list]
+    rhs_2 = [np.ceil(t * color_lb[color][i]) for i in range(num_centers) for color in color_list]
 
     constraints = lhs_constraints + rhs_constraints
     rhs = rhs_1 + rhs_2

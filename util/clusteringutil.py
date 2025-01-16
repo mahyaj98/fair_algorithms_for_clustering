@@ -1,13 +1,8 @@
 import datetime
 import json
 import random
-from collections import defaultdict
-import matplotlib.patches as mpatches
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from matplotlib import cm
-from pyclustering.cluster.kmedians import kmedians
 from scipy.spatial.distance import pdist, squareform
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler

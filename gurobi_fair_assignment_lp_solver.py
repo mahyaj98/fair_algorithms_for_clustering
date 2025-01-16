@@ -1,50 +1,72 @@
 import numpy as np
 from numpy.ma.extras import unique
 from scipy.spatial.distance import cdist
-from cplex import Cplex
-from FlowProblem import construct_flow_lp
+from FlowProblem_gurobi import construct_flow_lp
+from FlowInteger_gurobi import construct_flowint_lp
 from itertools import permutations
+import gurobipy as gp
+from gurobipy import GRB
 
 
 
 def fair_partial_assignment(df, centers, color_flag, attributes, t, g_opt):
 
     cost_fun_string = 'euclidean'
-    problem, objective = fair_partial_assignment_lp_solver(df, centers, color_flag, cost_fun_string, t, g_opt)
+    problem, objective = fair_partial_assignment_lp_solver(df, centers, color_flag, cost_fun_string,t, g_opt)
     attr = list(color_flag.keys())[0]
-    problem.solve()
-
+    problem.optimize()
 
     res = {
-        "status": problem.solution.get_status(),
-        "success": problem.solution.get_status_string(),
-        "objective": problem.solution.get_objective_value(),
-        "assignment": problem.solution.get_values(),
+        "success": problem.Status,
+        "objective": problem.ObjVal if problem.Status == 2 else -1,
+        "assignment": [var.X for var in problem.getVars()] if problem.Status == 2 else [0 for _ in problem.getVars()],
     }
 
 
-    if res["success"] == "optimal":
-        flow_res = construct_flow_lp(df,centers,color_flag ,attributes, res, t, g_opt)
+    if res["success"] == 2:
+        flow_res = construct_flow_lp(df,centers,color_flag ,attributes,res,t, g_opt)
+        if flow_res["success"] == 2:
 
-        flow_res["partial_assignment"] = res["assignment"]
-        flow_res["partial_objective"] = res["objective"]
+            flow_res["partial_assignment"] = res["assignment"]
+            flow_res["partial_objective"] = res["objective"]
 
-        flow_assignment = np.array(flow_res["assignment"]).reshape(len(df), len(centers)).tolist()
-        flow_assignment, unassigned, color_per_centre =  unassign_violations(flow_assignment, color_flag[attr], t, centers)
-        while unassigned.__len__() > 0:
-            flow_assignment, color_per_centre = balance_min(centers, color_per_centre, flow_assignment, color_flag[attr], t)
-            flow_assignment, unassigned, color_per_centre = type_one_reassign(flow_assignment, unassigned, centers,
-                                                                         color_per_centre, t)
+            flow_assignment = np.array(flow_res["assignment"]).reshape(len(df), len(centers)).tolist()
+            assignment, unassigned, color_per_centre =  unassign_violations(flow_assignment, color_flag[attr], t, centers)
 
-        flow_res["assignment"] = flow_assignment
+            while unassigned.__len__() > 0:
+                balance_f = True
+                for unassigned_pair in unassigned:
+                    reassigned_f, assignment, color_per_centre = simple_reassign(assignment, unassigned_pair, centers, color_per_centre, t)
+                    if reassigned_f:
+                        unassigned.remove(unassigned_pair)
+                        balance_f = False
+                        break
+                if balance_f:
+                    assignment, color_per_centre = balance_min(centers, color_per_centre, assignment, color_flag[attr])
 
-        distances = cost_function(df,centers,cost_fun_string)
-        assignment_1d = np.array(flow_assignment).ravel()
-        final_cost = np.inner(assignment_1d,distances)
+            flow_res["assignment"] = assignment
+            distances = cost_function( df, centers, cost_fun_string )
+            assignment_1d = np.array( flow_assignment ).ravel()
+            bench_cost = np.inner( assignment_1d, distances )
+            flow_res["fair_cost"] = bench_cost
+            intflow_res = construct_flowint_lp(df, centers, color_flag, color_per_centre)
+            if intflow_res["success"] == 2:
+                flow_res ["fair_cost"] = intflow_res["objective"]
+                flow_res ["assignment"] = intflow_res["assignment"]
+                assignment = np.array(intflow_res["assignment"]).reshape(len(df), len(centers)).tolist()
+                color_list = unique( color_flag[attr] )
+                color_per_centre = {}
+                for i in range( len( centers ) ):
+                    color_per_centre [i] = {}
+                    for color in range( len( color_list ) ):
+                        color_per_centre [i] [color] = sum(
+                            [assignment [j] [i] if color_flag[attr] [j] == color else 0 for j in range( len( assignment ) )] )
 
-        flow_res["fair_cost"] = final_cost
-        flow_res["color_per_centre"] = color_per_centre
-        return flow_res
+                flow_res ["color_per_centre"] = color_per_centre
+                return flow_res
+            else:
+                return flow_res
+        else: return flow_res
     else:
         return res
 
@@ -53,34 +75,21 @@ def is_color_and_centre(client, color, centre, assignment, color_flag):
         return True
     return False
 
-def balance_min(centres, color_per_centres, assignment, color_flag, t):
+def balance_min(centres, color_per_centres, assignment, color_flag):
 
     color_list = color_per_centres[0].keys()
-    for (cent1,cent2) in permutations(range(len(centres)),2):
-        min_1 = min(color_per_centres[cent1].values())
-        min_2 = min(color_per_centres[cent2].values())
-        max_1 = max(color_per_centres[cent1].values())
-        max_2 = max(color_per_centres[cent2].values())
-        for color in color_list:
-            if color_per_centres[cent1][color] > min_1 and color_per_centres[cent2][color] == min_2:
+    for color in color_list:
+        for cent in range(len(centres)):
+            min_0 = min(color_per_centres[0].values())
+            min_cent = min(color_per_centres[cent].values())
+            if color_per_centres[cent][color] > min_cent and color_per_centres[0][color] == min_0:
                 for j in range(len(assignment)):
-                    if is_color_and_centre(j, color, cent1, assignment, color_flag):
-                        assignment[j][cent1] = 0
-                        assignment[j][cent2] = 1
-                        color_per_centres[cent1][color] -= 1
-                        color_per_centres[cent2][color] += 1
+                    if is_color_and_centre(j, color, cent, assignment, color_flag):
+                        assignment[j][cent] = 0
+                        assignment[j][0] = 1
+                        color_per_centres[cent][color] -= 1
+                        color_per_centres[0][color] += 1
                         break
-            if color_per_centres[cent1][color] == min_1 and color_per_centres[cent2][color] == min_2:
-                if color_per_centres[cent1][color] > color_per_centres[cent2][color] and max_1 <= t * (color_per_centres[cent1][color] - 1):
-                    for j in range(len(assignment)):
-                        if is_color_and_centre(j, color, cent1, assignment, color_flag):
-                            assignment[j][cent1] = 0
-                            assignment[j][cent2] = 1
-                            color_per_centres[cent1][color] -= 1
-                            color_per_centres[cent2][color] += 1
-                            break
-
-
     return assignment, color_per_centres
 
 def is_fair_centre(color_in_centre, t):
@@ -129,51 +138,73 @@ def unassign_violations(assignment, color_flag, t, centres):
             is_fair, color1, color2, diff = is_fair_centre(color_per_centre[i], t)
     return assignment, unassigned, color_per_centre
 
-def type_one_reassign(assignment, unassigned_pairs, centres, color_per_centre, t):
-    tmp_unassigned_pairs = unassigned_pairs.copy()
+def simple_reassign(assignment, unassigned_pair, centres, color_per_centre, t):
 
-    for (j,color) in unassigned_pairs:
-        for i in range(len(centres)):
-            if is_there_space(color_per_centre[i], t, color):
-                assignment[j][i] = 1
-                color_per_centre[i][color] += 1
-                tmp_unassigned_pairs.remove((j,color))
-                break
+    j, color = unassigned_pair[0], unassigned_pair[1]
 
+    for i in range(len(centres)):
+        if is_there_space(color_per_centre[i], t, color):
+            assignment[j][i] = 1
+            color_per_centre[i][color] += 1
+            return True, assignment, color_per_centre
 
-    return assignment, tmp_unassigned_pairs, color_per_centre
+    return False, assignment, color_per_centre
 
 def fair_partial_assignment_lp_solver(df, centers, color_flag, cost_fun_string, t, g_opt):
 
 
 
-    problem = Cplex()
-
-
-    problem.objective.set_sense(problem.objective.sense.minimize)
+    problem = gp.Model("mip1")
 
 
 
-    objective, lower_bounds, upper_bounds, variable_names = prepare_to_add_variables(df, centers, cost_fun_string)
-    problem.variables.add(obj=objective,
-                          lb=lower_bounds,
-                          ub=upper_bounds,
-                          names=variable_names)
+
+
+    lower_bounds, upper_bounds, variable_names = prepare_to_add_variables(df, centers)
+
+    varname_to_var = {}
+    for i in range(len(variable_names)):
+        varname_to_var[variable_names[i]] = problem.addVar(lb=lower_bounds[i], ub=upper_bounds[i], name=variable_names[i])
+
+
+
 
 
 
     objects_returned = prepare_to_add_constraints(df, centers, cost_fun_string,color_flag, t, g_opt)
     constraints_row, senses, rhs, constraint_names = objects_returned
-    problem.linear_constraints.add(lin_expr=constraints_row,
-                                   senses=senses,
-                                   rhs=rhs,
-                                   names=constraint_names)
+    for i in range(len(constraints_row)):
+        if senses[i] == "E":
+            problem.addConstr( sum(
+                [varname_to_var[name] * coef for (name, coef) in
+                 zip( constraints_row [i] [0], constraints_row [i] [1] )] ) == rhs [i]
+                               , name=constraint_names [i] )
+        elif senses[i] == "G":
+            problem.addConstr(sum(
+                [varname_to_var[name] * coef for (name, coef) in
+                 zip(constraints_row[i][0], constraints_row[i][1])]) >= rhs[i]
+                              , name=constraint_names[i])
+        else:
+            problem.addConstr(sum(
+                [varname_to_var[name] * coef for (name, coef) in
+                 zip(constraints_row[i][0], constraints_row[i][1])]) <= rhs[i]
+                              , name=constraint_names[i])
+
+
+
+    objective = cost_function(df, centers, cost_fun_string)
+
+    problem.setObjective(sum(
+                [varname_to_var[name] * distance for (name, distance) in
+                 zip(variable_names, objective)]),
+        GRB.MINIMIZE
+    )
 
 
 
     return problem, objective
 
-def prepare_to_add_variables(df, centers, cost_fun_string):
+def prepare_to_add_variables(df, centers):
 
     num_points = len(df)
     num_centers = len(centers)
@@ -186,9 +217,8 @@ def prepare_to_add_variables(df, centers, cost_fun_string):
     upper_bounds = [1 for _ in range(total_variables)]
 
 
-    objective = cost_function(df, centers, cost_fun_string)
 
-    return objective, lower_bounds, upper_bounds, variable_names
+    return lower_bounds, upper_bounds, variable_names
 
 def cost_function(df,centers, cost_fun_string):
     all_pair_distance = cdist(df.values,centers,cost_fun_string)
@@ -228,7 +258,7 @@ def prepare_to_add_constraints(df, centers, cost_fun_string, color_flag, t, g_op
 
 def constraints_cut_off_opt(num_points, num_centers, distances ,g_opt):
 
-    constraints = [[["x_{}_{}".format(j, i)],[1 if distances[j][i] > 3 * g_opt else 0]] for i in range(num_centers) for j in range(num_points)]
+    constraints = [[["x_{}_{}".format(j, i)],[1 if distances[j][i] > g_opt else 0]] for i in range(num_centers) for j in range(num_points)]
     rhs = [0] * (num_points * num_centers)
     return constraints, rhs
 
