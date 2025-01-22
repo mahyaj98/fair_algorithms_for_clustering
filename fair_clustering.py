@@ -37,7 +37,7 @@ def cost_function_euc(df):
     all_pair_distance = pairwise_distances(df.values)
     return all_pair_distance.ravel().tolist()
 
-def fair_clustering(dataset: str, config_file: str, data_dir: str, num_clusters: int, max_points: int) -> None:
+def fair_clustering(dataset: str, config_file: str, data_dir: str, num_clusters: int, max_points: int, trial_number: int) -> None:
     config = configparser.ConfigParser(converters={'list': read_list})
     config.read(config_file)
 
@@ -157,9 +157,10 @@ def fair_clustering(dataset: str, config_file: str, data_dir: str, num_clusters:
 
     distances = cost_function_euc(df)
     max_distance = max(distances)
+    min_distance = min((x for x in distances if x != 0))
         # Solves partial assignment and then performs rounding to get integral assignment
-    epsilon = 0.1
-    g_opt = initial_score
+    epsilon = (max_distance - min_distance) ** (0.01)
+    g_opt = min_distance
     output = defaultdict( dict )
     t1 = time.monotonic()
     for i in range(0,100):
@@ -228,7 +229,7 @@ def fair_clustering(dataset: str, config_file: str, data_dir: str, num_clusters:
                 min_obj = res["fair_score"]
                 min_obj_index = index
 
-        save_file_string = dataset +  "_" + str(output[min_obj_index]["num_clients"])  + "_" + str(output[min_obj_index]["num_clusters"]) + "_" + str(output[min_obj_index]["num_colors"]) + "_" + str(output[min_obj_index]["t_value"])
+        save_file_string = dataset +  "_" + str(trial_number) + "_" +str(output[min_obj_index]["num_clients"])  + "_" + str(output[min_obj_index]["num_clusters"]) + "_" + str(output[min_obj_index]["num_colors"]) + "_" + str(output[min_obj_index]["t_value"])
 
         os.makedirs("./" + save_file_string + "/", exist_ok=True)
 
@@ -240,10 +241,10 @@ def fair_clustering(dataset: str, config_file: str, data_dir: str, num_clusters:
         df_plot.transpose().plot.bar()
 
         plt.savefig("./" + save_file_string + "/vanilla.png")
-
+        plt.close()
         df_plot = pd.DataFrame(output[min_obj_index]["color_per_centre"])
         df_plot.transpose().plot.bar()
         plt.savefig("./" + save_file_string + "/fair.png")
-
+        plt.close()
 
 
