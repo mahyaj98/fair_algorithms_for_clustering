@@ -159,19 +159,23 @@ def fair_clustering(dataset: str, config_file: str, data_dir: str, num_clusters:
     max_distance = max(distances)
     min_distance = min((x for x in distances if x != 0))
         # Solves partial assignment and then performs rounding to get integral assignment
-    epsilon = (max_distance - min_distance) ** (0.01)
-    g_opt = min_distance
+    epsilon = 0.1
+    g_opt = min_distance + 0.0000001
+
     output = defaultdict( dict )
     t1 = time.monotonic()
-    for i in range(0,100):
+    i = 0
+    while g_opt <= max_distance:
 
-        res = fair_partial_assignment(df, cluster_centers, fp_color_flag, fp_attributes, t, g_opt)
+        res, need_to_reassign = fair_partial_assignment(df, cluster_centers, fp_color_flag, fp_attributes, t, g_opt)
 
         if res["success"] == 2:
 
             output[i] = {}
 
             output[i]["Opt_cutoff"] = g_opt
+            output[i]["Nodes to Reassign"] = need_to_reassign
+
 
             output[i]["num_clients"] = len(df)
 
@@ -201,7 +205,6 @@ def fair_clustering(dataset: str, config_file: str, data_dir: str, num_clusters:
 
             output[i]["points"] = [list(point) for point in df.values]
 
-
             output[i]["assignment"] = res["assignment"]
 
             output[i]["partial_assignment"] = res["partial_assignment"]
@@ -210,26 +213,25 @@ def fair_clustering(dataset: str, config_file: str, data_dir: str, num_clusters:
 
             output[i]["cluster_time"] = cluster_time
 
-            output[i]["color_per_centre"] = res["color_per_centre"]
+            # output[i]["color_per_centre"] = res["color_per_centre"]
 
             output[i]["color_per_centre_vanilla"] = color_per_centre_vanilla
 
-            if g_opt > max_distance:
-                break
-            g_opt = g_opt * (1 + epsilon)
+        g_opt = g_opt * (1 + epsilon)
+        i+=1
 
 
     t2 = time.monotonic()
     fair_time = t2 - t1
     if len(output) > 0:
-        min_obj = 1000000000
+        min_obj = 10000000000
         min_obj_index = -1
         for index, res in output.items():
             if res["fair_score"] < min_obj:
                 min_obj = res["fair_score"]
                 min_obj_index = index
 
-        save_file_string = dataset +  "_" + str(trial_number) + "_" +str(output[min_obj_index]["num_clients"])  + "_" + str(output[min_obj_index]["num_clusters"]) + "_" + str(output[min_obj_index]["num_colors"]) + "_" + str(output[min_obj_index]["t_value"])
+        save_file_string = dataset +  "_" + str(trial_number) + "_" +str(output[min_obj_index]["num_clients"])  + "_" + str(output[min_obj_index]["num_clusters"]) + "_" + str(output[min_obj_index]["num_colors"]) + "_" + str(output[min_obj_index]["t_value"]) + "_" + str(i)
 
         os.makedirs("./" + save_file_string + "/", exist_ok=True)
 
@@ -237,14 +239,14 @@ def fair_clustering(dataset: str, config_file: str, data_dir: str, num_clusters:
         output[min_obj_index]["fair_time"] = fair_time
         json.dump(output[min_obj_index], out_file)
 
-        df_plot = pd.DataFrame(color_per_centre_vanilla[attr])
-        df_plot.transpose().plot.bar()
-
-        plt.savefig("./" + save_file_string + "/vanilla.png")
-        plt.close()
-        df_plot = pd.DataFrame(output[min_obj_index]["color_per_centre"])
-        df_plot.transpose().plot.bar()
-        plt.savefig("./" + save_file_string + "/fair.png")
-        plt.close()
+        # df_plot = pd.DataFrame(color_per_centre_vanilla[attr])
+        # df_plot.transpose().plot.bar()
+        #
+        # plt.savefig("./" + save_file_string + "/vanilla.png")
+        # plt.close()
+        # df_plot = pd.DataFrame(output[min_obj_index]["color_per_centre"])
+        # df_plot.transpose().plot.bar()
+        # plt.savefig("./" + save_file_string + "/fair.png")
+        # plt.close()
 
 

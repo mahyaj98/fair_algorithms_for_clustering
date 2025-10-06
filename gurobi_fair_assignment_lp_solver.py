@@ -32,7 +32,7 @@ def fair_partial_assignment(df, centers, color_flag, attributes, t, g_opt):
 
             flow_assignment = np.array(flow_res["assignment"]).reshape(len(df), len(centers)).tolist()
             assignment, unassigned, color_per_centre =  unassign_violations(flow_assignment, color_flag[attr], t, centers)
-
+            need_to_reassign = unassigned.__len__()
             while unassigned.__len__() > 0:
                 balance_f = True
                 for unassigned_pair in unassigned:
@@ -63,12 +63,12 @@ def fair_partial_assignment(df, centers, color_flag, attributes, t, g_opt):
                             [assignment [j] [i] if color_flag[attr] [j] == color else 0 for j in range( len( assignment ) )] )
 
                 flow_res ["color_per_centre"] = color_per_centre
-                return flow_res
+                return flow_res, need_to_reassign
             else:
-                return flow_res
-        else: return flow_res
+                return flow_res, need_to_reassign
+        else: return flow_res, 0
     else:
-        return res
+        return res, 0
 
 def is_color_and_centre(client, color, centre, assignment, color_flag):
     if color_flag[client] == color and assignment[client][centre] == 1:
