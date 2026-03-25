@@ -20,7 +20,7 @@ def combine_results(dir_list):
 
     return results
 
-dataset = "census"
+dataset = ("census1990_ss")
 
 # Average over
 
@@ -31,6 +31,12 @@ experiment_results = combine_results(dir_list)
 
 
 df_cost = pd.DataFrame(experiment_results, columns=["unfair_score", "fair_score", "num_clients", "t_value", "num_colors", "num_clusters"])
+# if not df_cost.empty:
+#     experiment_counts = df_cost.groupby(['num_clients', 'num_clusters']).size().reset_index(name='experiment_count')
+#     print("Experiment counts per configuration:")
+#     print(experiment_counts)
+# else:
+#     print("No data available to count experiments.")
 
 
 client_count = df_cost['num_clients'].unique()
@@ -42,17 +48,13 @@ stats_df = df_filtered.groupby(['num_clients', 'num_clusters']).agg({
     'unfair_score': ['mean', 'std', lambda x: stats.t.interval(0.95, len(x)-1, loc=np.mean(x), scale=stats.sem(x))[0],
                      lambda x: stats.t.interval(0.95, len(x)-1, loc=np.mean(x), scale=stats.sem(x))[1]],
     'fair_score': ['mean', 'std', lambda x: stats.t.interval(0.95, len(x)-1, loc=np.mean(x), scale=stats.sem(x))[0],
-                   lambda x: stats.t.interval(0.95, len(x)-1, loc=np.mean(x), scale=stats.sem(x))[1]]
+                   lambda x: stats.t.interval(0.95, len(x)-1, loc=np.mean(x), scale=stats.sem(x))[1]],
 }).reset_index()
 stats_df.columns = ['num_clients', 'num_clusters',
                    'unfair_mean', 'unfair_std', 'unfair_ci_low', 'unfair_ci_high',
                    'fair_mean', 'fair_std', 'fair_ci_low', 'fair_ci_high']
 
 # Create visualization
-# df_time = pd.DataFrame(experiment_results, columns=["cluster_time", "fair_time", "num_clients", "t_value", "num_colors", "num_clusters"])
-# df_time["total_fair_time"] = df_time["fair_time"] + df_time["cluster_time"]
-# df_filtered_time = df_time[df_time['num_clients'] >= 2000 ]
-# df_filtered_time = df_filtered_time[df_filtered_time['num_clients'] <= 5000 ]
 
 plt.figure(figsize=(12, 6))
 
@@ -131,6 +133,17 @@ plt.show()
 # meantime_df = df_time.groupby(['num_clients', 'num_clusters'])[["cluster_time", 'total']].mean().reset_index()
 # mean_df.to_excel(f"{dataset}_means.xlsx", index=False)
 # df_cost.to_excel(f"{dataset}_costs.xlsx", index=False)
+df_time = pd.DataFrame(experiment_results, columns=["cluster_time", "fair_time", "num_clients", "t_value", "num_colors", "num_clusters"])
+df_time["total_fair_time"] = df_time["fair_time"] + df_time["cluster_time"]
+df_filtered_time = df_time[df_time['num_clients'] >= 2000 ]
+df_filtered_time = df_filtered_time[df_filtered_time['num_clients'] <= 5000 ]
+
+stats_df_time = df_filtered_time.groupby(['num_clients', 'num_clusters']).agg({
+    'cluster_time': ['mean'],
+    'total_fair_time': ['mean'],
+}).reset_index()
+stats_df_time.columns = ['num_clients', 'num_clusters',
+                   'unfair_mean', 'fair_mean']
 
 for k in [5,10,15,20]:
 
@@ -144,68 +157,68 @@ for k in [5,10,15,20]:
     df_cost_tmp.plot( x="num_clients", y=["unfair_mean", "fair_mean"],
                       kind="line", style=["r--", "b--"], xlabel="Number of clients", ylabel=["Cost"],
                       label=["Vanilla", "Fair"] )
-    plt.suptitle( "census1990_ss", fontsize=14, fontweight='bold' )
+    plt.suptitle( dataset, fontsize=14, fontweight='bold' )
 
     plt.savefig( dataset +"_k=" + str(k) +"_cost_comparison_avg.png" )
     plt.close()
 
-    # df_time_tmp = pd.DataFrame()
-    # # for n in client_count:
-    # #     tmp = df_time.loc [(df_time ['num_clusters'] == k) & (df_time ["num_clients"] == n)].sort_values( 'total_fair_time',
-    # #                                                                                                       ascending=True ).drop_duplicates(
-    # #         subset=['num_clients'], keep='first' )
-    # #     df_time_tmp = pd.concat( [df_time_tmp, tmp] )
-    # #
-    # # df_time_tmp = df_time_tmp.sort_values( 'num_clients', ascending=True )
-    # df_cost_tmp = meantime_df.loc[meantime_df['num_clusters']==k]
-    # df_time_tmp.plot( x="num_clients", y=["cluster_time", "total_fair_time"],
-    #               kind="line", style=["r--", "b--"], xlabel="Number of clients", ylabel=["Time(Seconds)"],
-    #               label=["Vanilla Clustering", "Vanilla Clustering + Fair Algorithm"] )
-    # plt.suptitle( "adult_race", fontsize=14, fontweight='bold' )
-    # plt.savefig( dataset + "_k=" + str( k ) + "_time_comparison.png" )
-    # plt.close()
+    df_time_tmp = pd.DataFrame()
+    # for n in client_count:
+    #     tmp = df_time.loc [(df_time ['num_clusters'] == k) & (df_time ["num_clients"] == n)].sort_values( 'total_fair_time',
+    #                                                                                                       ascending=True ).drop_duplicates(
+    #         subset=['num_clients'], keep='first' )
+    #     df_time_tmp = pd.concat( [df_time_tmp, tmp] )
+    #
+    # df_time_tmp = df_time_tmp.sort_values( 'num_clients', ascending=True )
+    df_time_tmp = stats_df_time.loc[stats_df_time['num_clusters']==k]
+    df_time_tmp.plot( x="num_clients", y=["unfair_mean", "fair_mean"],
+                  kind="line", style=["r--", "b--"], xlabel="Number of clients", ylabel=["Time(Seconds)"],
+                  label=["Vanilla Clustering", "Vanilla Clustering + Fair Algorithm"] )
+    plt.suptitle( dataset, fontsize=14, fontweight='bold' )
+    plt.savefig( dataset + "_k=" + str( k ) + "_time_comparison.png" )
+    plt.close()
 
 
+for k in [5,10,15,20]:
+    for n in client_count:
+        fixed_num_clients = n
+        fixed_num_clusters = k
 
-if not stats_df.empty:
-    fixed_num_clients = stats_df['num_clients'].iloc[0]
-    fixed_num_clusters = stats_df['num_clusters'].iloc[0]
+        print(f"Analyzing for fixed num_clients={fixed_num_clients} and num_clusters={fixed_num_clusters}")
 
-    print(f"Analyzing for fixed num_clients={fixed_num_clients} and num_clusters={fixed_num_clusters}")
+        df_t_filtered = df_cost[(df_cost['num_clients'] == fixed_num_clients) & (df_cost['num_clusters'] == fixed_num_clusters)]
 
-    df_t_filtered = df_cost[(df_cost['num_clients'] == fixed_num_clients) & (df_cost['num_clusters'] == fixed_num_clusters)]
+        if not df_t_filtered.empty:
+            stats_t_df = df_t_filtered.groupby(['t_value']).agg({
+                'unfair_score': ['mean', 'std'],
+                'fair_score': ['mean', 'std']
+            }).reset_index()
+            stats_t_df.columns = ['t_value', 'unfair_mean', 'unfair_std', 'fair_mean', 'fair_std']
 
-    if not df_t_filtered.empty:
-        stats_t_df = df_t_filtered.groupby(['t_value']).agg({
-            'unfair_score': ['mean', 'std'],
-            'fair_score': ['mean', 'std']
-        }).reset_index()
-        stats_t_df.columns = ['t_value', 'unfair_mean', 'unfair_std', 'fair_mean', 'fair_std']
+            plt.figure(figsize=(10, 6))
+            plt.errorbar(stats_t_df['t_value'],
+                         stats_t_df['fair_mean'],
+                         yerr=stats_t_df['fair_std'],
+                         fmt='o-',
+                         capsize=5,
+                         label='Fair Score')
+            plt.errorbar(stats_t_df['t_value'],
+                         stats_t_df['unfair_mean'],
+                         yerr=stats_t_df['unfair_std'],
+                         fmt='o-',
+                         capsize=5,
+                         label='Unfair Score')
 
-        plt.figure(figsize=(10, 6))
-        plt.errorbar(stats_t_df['t_value'],
-                     stats_t_df['fair_mean'],
-                     yerr=stats_t_df['fair_std'],
-                     fmt='o-',
-                     capsize=5,
-                     label='Fair Score')
-        plt.errorbar(stats_t_df['t_value'],
-                     stats_t_df['unfair_mean'],
-                     yerr=stats_t_df['unfair_std'],
-                     fmt='o-',
-                     capsize=5,
-                     label='Unfair Score')
-
-        plt.title(f'Cost vs. t-value for {fixed_num_clients} Clients and {fixed_num_clusters} Clusters')
-        plt.xlabel('t-value')
-        plt.ylabel('Cost')
-        plt.legend()
-        plt.grid(True)
-        plt.savefig(f'{dataset}_cost_vs_t_k={fixed_num_clusters}_n={fixed_num_clients}.png', dpi=300, bbox_inches='tight')
-        plt.show()
+            plt.title(f'Cost vs. t-value for {fixed_num_clients} Clients and {fixed_num_clusters} Clusters')
+            plt.xlabel('t-value')
+            plt.ylabel('Cost')
+            plt.legend()
+            plt.grid(True)
+            plt.savefig(f'{dataset}_cost_vs_t_k={fixed_num_clusters}_n={fixed_num_clients}.png', dpi=300, bbox_inches='tight')
+            plt.show()
+        else:
+            print("No data found for the selected configuration to compare t-values.")
     else:
-        print("No data found for the selected configuration to compare t-values.")
-else:
-    print("No data in stats_df to choose configuration from.")
+        print("No data in stats_df to choose configuration from.")
 
 

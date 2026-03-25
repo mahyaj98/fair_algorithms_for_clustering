@@ -39,13 +39,13 @@ def construct_flow_lp(df, centres, color_flag, atrributes, res, t, g_opt):
 
 def fair_flow_lp_solver(df, centers, color_flag, cost_fun_string, t, g_opt, color_lb):
     problem = gp.Model("mip2")
-
+    # problem.setAttr('vtype', 'B')
     lower_bounds, upper_bounds, variable_names = prepare_to_add_variables_flow( df, centers )
 
     varname_to_var = {}
     for i in range( len( variable_names ) ):
         varname_to_var [variable_names [i]] = problem.addVar( lb=lower_bounds [i], ub=upper_bounds [i],
-                                                              name=variable_names [i] )
+                                                              name=variable_names [i],  vtype=GRB.BINARY)
 
     objects_returned = prepare_to_add_constraints_flow( df, centers, cost_fun_string, color_flag, t, g_opt , color_lb)
     constraints_row, senses, rhs, constraint_names = objects_returned
